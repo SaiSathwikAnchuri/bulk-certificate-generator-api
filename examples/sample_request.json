@@ -1,0 +1,22 @@
+{
+  "certificate": {
+    "title": "Certificate of Completion",
+    "event_name": "Python Bootcamp 2026",
+    "issue_date": "2026-10-01",
+    "issued_by": "VNR Tech Club"
+  },
+  "recipients": [
+    {
+      "name": "Asha Rao",
+      "email": "asha@example.com"
+    },
+    {
+      "name": "",
+      "email": "blank@example.com"
+    },
+    {
+      "name": "Ravi Kumar",
+      "email": "not-an-email"
+    }
+  ]
+}
