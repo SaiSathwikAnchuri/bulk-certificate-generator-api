@@ -16,6 +16,8 @@ def create_db_engine(db_url: str):
     connect_args = {}
     if db_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
+    elif "psycopg" in db_url:
+        connect_args["connect_timeout"] = 5
     return create_engine(db_url, pool_pre_ping=True, connect_args=connect_args)
 
 
