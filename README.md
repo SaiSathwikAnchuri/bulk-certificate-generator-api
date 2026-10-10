@@ -296,9 +296,48 @@ pytest tests/ --cov=app --cov-report=term-missing
 
 ---
 
+## 💡 Important Implementation & Design Decisions
+
+### 1. Two-Tier Validation Strategy
+- **Why**: In bulk processing workloads (e.g. 500 recipients), failing the entire batch because recipient #492 has a typo in their email creates poor user experience.
+- **Design**:
+  - **Tier 1 (Request Schema Level)**: Uses Pydantic v2 to validate payload structure, required fields, date formats, and array length limits (`MAX_RECIPIENTS`). If the structure is malformed or all rows are invalid, the API rejects immediately with `422 Unprocessable Entity`.
+  - **Tier 2 (Row-Level Partial Acceptance)**: Individual recipient records are validated for format and uniqueness. Valid records are marked `pending` and scheduled for PDF generation, while invalid rows are marked `invalid` with the exact error saved to the database. The API returns `202 Accepted` with summary counts and error details so the client can fix invalid rows independently.
+
+### 2. Asynchronous Background Workers with Fast Client Acknowledgement
+- **Why**: Generating 1,000 PDF certificates synchronously would exceed HTTP request timeouts (30–60s) and block client connections.
+- **Design**: When a batch is submitted, the job metadata and certificate records are immediately persisted to PostgreSQL. The API returns `202 Accepted` within milliseconds with a unique `job_id` and polling URL (`/api/v1/jobs/{job_id}`). PDF rendering is dispatched asynchronously via FastAPI `BackgroundTasks`.
+
+### 3. Per-Row Failure Isolation & Atomic Persistence
+- **Why**: Rendering individual certificates can fail due to unexpected character encodings, font glitches, or memory constraints. One failure must not abort or roll back other successful certificates.
+- **Design**: In `job_processor.py`, each certificate is wrapped in an isolated `try/except` block and committed individually. If an error occurs, the certificate status is set to `failed` with the error trace stored on that row, and processing continues immediately for the remaining certificates.
+
+### 4. Pure-Python Vector PDF Generation (ReportLab Canvas)
+- **Why**: Heavy solutions (like headless Chromium, WeasyPrint, or wkhtmltopdf) require bulky system binaries, native OS packages, and high memory footprints.
+- **Design**: ReportLab renders directly to vector PDF primitives using pure Python with zero external C-dependencies. It includes custom layout geometry, decorative multi-line border styling, dynamic typography scaling for long recipient names, and metadata stamping.
+
+### 5. Deterministic State Machine
+- **Lifecycle**:
+  - `pending`: Job record created, worker scheduled.
+  - `processing`: Background worker is actively iterating and rendering PDFs.
+  - `completed`: All valid recipients successfully rendered, 0 errors, 0 invalid rows.
+  - `completed_with_errors`: At least one certificate was rendered, but some rows were either invalid or failed.
+  - `failed`: No certificates could be generated, or an unrecoverable system exception occurred.
+
+### 6. Ephemeral Archive Storage & Streaming Cleanup
+- **Why**: Building bulk ZIP downloads can consume large amounts of disk space if archives are permanently retained.
+- **Design**: The `GET /api/v1/jobs/{job_id}/download` endpoint builds a zip archive on the fly into a temporary file and uses Starlette's `BackgroundTask` to delete the archive from disk automatically after streaming to the client.
+
+### 7. Dual-Database Strategy for Isolated Testing
+- **Production**: Uses PostgreSQL via SQLAlchemy 2.0 with connection pool pre-pinging, indexing on status/foreign keys, and PostgreSQL-optimized UUID primary keys.
+- **Automated Testing**: Pytest suite runs against an in-memory/file SQLite database (`connect_args={"check_same_thread": False}`) with session-scoped fixtures, enabling all 39 tests to run in under 3 seconds without external database dependencies.
+
+---
+
 ## 🛡️ Resilience & Security Design
 
-1. **Failure Isolation**: Generation of each PDF runs inside a per-item transaction so transient errors (e.g., rendering bugs) are recorded on that row without crashing the job.
+1. **Failure Isolation**: Generation of each PDF runs inside a per-item transaction so transient errors are recorded on that row without crashing the job.
 2. **Safe Filenames**: Content-Disposition headers sanitize recipient names with `re.sub(r'[\/*?:"<>| ]+', '_', name)` to prevent directory traversal or header injection.
 3. **Atomic File Writes**: ReportLab renders PDFs to a temporary buffer and writes to destination paths with directory auto-creation (`parents=True, exist_ok=True`).
 4. **Temporary ZIP Cleanup**: The bulk ZIP download utilizes FastAPI's `BackgroundTask` to safely delete temporary archives from disk immediately after streaming to the client.
+
